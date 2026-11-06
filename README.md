@@ -55,6 +55,7 @@ GuitarTuner/
 
 ## Changelog
 
+- 1.1.1 (2026-11-06): the microphone restarts by itself after an interruption (call, Siri, alarm), an audio configuration change or a reset of the audio services.
 - 1.1 (2026-11-06): English interface; redesigned gauge with colour band and green zone; rising pitch trace; smoother needle.
 - 1.0 (2026-10-16): first version.
 

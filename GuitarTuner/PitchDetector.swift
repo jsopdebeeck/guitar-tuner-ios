@@ -70,24 +70,37 @@ enum AudioCaptureError: LocalizedError {
 }
 
 /// Capture micro via AVAudioEngine ; analyse sur une file série dédiée.
+/// Le pilotage du moteur (start, stop, reprise) se fait sur le fil principal.
 nonisolated final class AudioCapture: @unchecked Sendable {
     typealias Handler = @Sendable (_ frequency: Double?) -> Void
 
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
     private let queue = DispatchQueue(label: "tuner.dsp", qos: .userInteractive)
     private let windowSize = 4096     // ≈ 85 ms à 48 kHz : couvre ~6 périodes de E2
     private let hopSize = 2048        // ≈ 23 analyses/s
     private let rmsGate: Float = 0.005
     private var pending: [Float] = []
     private let handler: Handler
-    private(set) var isRunning = false
+    private var tapInstalled = false
+    private var wantsRunning = false  // capture demandée par l'app (au premier plan)
+    private var observers: [NSObjectProtocol] = []
+
+    var isRunning: Bool { engine.isRunning }
 
     init(handler: @escaping Handler) {
         self.handler = handler
+        observeSystemEvents()
     }
 
+    deinit {
+        observers.forEach(NotificationCenter.default.removeObserver)
+    }
+
+    /// Démarre la capture. Sans effet si le moteur tourne déjà ; relance un moteur
+    /// arrêté par le système (interruption, changement de configuration).
     func start() throws {
-        guard !isRunning else { return }
+        wantsRunning = true
+        guard !engine.isRunning else { return }
 
         let session = AVAudioSession.sharedInstance()
         // .measurement désactive AGC et traitements vocaux : signal brut, indispensable pour un accordeur.
@@ -98,25 +111,66 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw AudioCaptureError.noInput }
 
+        // Un tap peut rester posé après un arrêt imposé par le système, et le format a pu changer :
+        // on le remplace.
+        if tapInstalled { input.removeTap(onBus: 0) }
         let detector = YIN(sampleRate: format.sampleRate)
         input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
             guard let self, let channel = buffer.floatChannelData?[0] else { return }
             let samples = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
             self.queue.async { self.process(samples, detector) }
         }
+        tapInstalled = true
 
         engine.prepare()
         try engine.start()
-        isRunning = true
     }
 
     func stop() {
-        guard isRunning else { return }
-        engine.inputNode.removeTap(onBus: 0)
+        wantsRunning = false
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
         engine.stop()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         queue.async { self.pending.removeAll() }
-        isRunning = false
+    }
+
+    /// Relance complète si la capture est demandée. Une erreur est ignorée ici :
+    /// le retour de l'app au premier plan refait une tentative.
+    private func resume() {
+        guard wantsRunning else { return }
+        engine.stop()
+        queue.async { self.pending.removeAll() }
+        try? start()
+    }
+
+    private func observeSystemEvents() {
+        let center = NotificationCenter.default
+        let session = AVAudioSession.sharedInstance()
+        observers = [
+            // Fin d'interruption (appel, Siri, alarme) : le moteur reste arrêté tant qu'on ne le relance pas.
+            center.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] note in
+                guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                      AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
+                self?.resume()
+            },
+            // Changement de configuration (micro branché ou retiré, fréquence d'échantillonnage) :
+            // le moteur s'arrête de lui-même.
+            center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] note in
+                guard let self, (note.object as? AVAudioEngine) === self.engine else { return }
+                self.resume()
+            },
+            // Réinitialisation des services audio : les objets audio existants ne sont plus valides,
+            // il faut un moteur neuf.
+            center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.engine = AVAudioEngine()
+                self.tapInstalled = false
+                self.resume()
+            },
+        ]
     }
 
     private func process(_ samples: [Float], _ detector: YIN) {

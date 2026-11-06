@@ -1,6 +1,6 @@
 # Tuner — app iOS (SwiftUI)
 
-Projet Xcode prêt à ouvrir. Version 1.1. iOS 17+, iPhone, portrait. Aucune dépendance externe.
+Projet Xcode prêt à ouvrir. Version 1.1.1. iOS 17+, iPhone, portrait. Aucune dépendance externe.
 Interface en anglais. Nom affiché sur l'écran d'accueil : **Tuner**. Bundle ID : `be.opdebeeck.GuitarTuner`.
 
 ## Prérequis
@@ -46,5 +46,6 @@ GuitarTuner/
 ## Historique des versions
 | Version | Date | Objet |
 |---|---|---|
+| 1.1.1 | 06/11/2026 | Le micro redémarre seul après une interruption (appel, Siri, alarme), un changement de configuration audio ou une réinitialisation des services audio. |
 | 1.1 | 06/11/2026 | Interface en anglais, nom affiché « Tuner ». Cadran redessiné : bande colorée vert → jaune → orange → rouge, zone verte ±3 ¢ matérialisée sur l'arc et prolongée en colonne, graduations tous les 5 ¢, ♭/♯ aux extrémités. Trace des mesures qui naît à la pointe de l'aiguille et remonte. Aiguille fluide (interpolation entre deux mesures). |
 | 1.0 | 16/10/2026 | Version initiale. |
