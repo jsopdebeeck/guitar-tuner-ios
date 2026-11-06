@@ -59,3 +59,7 @@ GuitarTuner/
 - 1.0 (2026-10-16): first version.
 
 French installation guide: [README.fr.md](README.fr.md).
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
