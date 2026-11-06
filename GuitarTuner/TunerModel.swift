@@ -52,7 +52,7 @@ final class TunerModel {
                 Task { @MainActor in self.handle(f) }
             }
         }
-        do { try capture?.start() } catch { errorMessage = error.localizedDescription }
+        do { try await capture?.start() } catch { errorMessage = error.localizedDescription }
     }
 
     func stop() {

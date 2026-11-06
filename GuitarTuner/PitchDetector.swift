@@ -70,12 +70,15 @@ enum AudioCaptureError: LocalizedError {
 }
 
 /// Capture micro via AVAudioEngine ; analyse sur une file série dédiée.
-/// Le pilotage du moteur (start, stop, reprise) se fait sur le fil principal.
+/// Le pilotage du moteur et de la session audio (start, stop, reprise) passe par une
+/// seconde file série, `control` : `AVAudioSession.setActive` peut bloquer, il ne doit
+/// pas tourner sur le fil principal. L'état du moteur n'est lu et modifié que sur `control`.
 nonisolated final class AudioCapture: @unchecked Sendable {
     typealias Handler = @Sendable (_ frequency: Double?) -> Void
 
     private var engine = AVAudioEngine()
     private let queue = DispatchQueue(label: "tuner.dsp", qos: .userInteractive)
+    private let control = DispatchQueue(label: "tuner.audio.control", qos: .userInitiated)
     private let windowSize = 4096     // ≈ 85 ms à 48 kHz : couvre ~6 périodes de E2
     private let hopSize = 2048        // ≈ 23 analyses/s
     private let rmsGate: Float = 0.005
@@ -84,8 +87,6 @@ nonisolated final class AudioCapture: @unchecked Sendable {
     private var tapInstalled = false
     private var wantsRunning = false  // capture demandée par l'app (au premier plan)
     private var observers: [NSObjectProtocol] = []
-
-    var isRunning: Bool { engine.isRunning }
 
     init(handler: @escaping Handler) {
         self.handler = handler
@@ -96,9 +97,30 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         observers.forEach(NotificationCenter.default.removeObserver)
     }
 
-    /// Démarre la capture. Sans effet si le moteur tourne déjà ; relance un moteur
-    /// arrêté par le système (interruption, changement de configuration).
-    func start() throws {
+    /// Démarre la capture hors du fil principal et rend la main une fois le moteur lancé.
+    /// Sans effet si le moteur tourne déjà ; relance un moteur arrêté par le système.
+    func start() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            control.async {
+                do {
+                    try self.startEngine()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Arrête la capture et libère la session audio, hors du fil principal.
+    func stop() {
+        control.async { self.stopEngine() }
+    }
+
+    // MARK: Pilotage, sur la file `control` uniquement
+
+    private func startEngine() throws {
+        dispatchPrecondition(condition: .onQueue(control))
         wantsRunning = true
         guard !engine.isRunning else { return }
 
@@ -126,7 +148,8 @@ nonisolated final class AudioCapture: @unchecked Sendable {
         try engine.start()
     }
 
-    func stop() {
+    private func stopEngine() {
+        dispatchPrecondition(condition: .onQueue(control))
         wantsRunning = false
         if tapInstalled {
             engine.inputNode.removeTap(onBus: 0)
@@ -140,35 +163,43 @@ nonisolated final class AudioCapture: @unchecked Sendable {
     /// Relance complète si la capture est demandée. Une erreur est ignorée ici :
     /// le retour de l'app au premier plan refait une tentative.
     private func resume() {
+        dispatchPrecondition(condition: .onQueue(control))
         guard wantsRunning else { return }
         engine.stop()
         queue.async { self.pending.removeAll() }
-        try? start()
+        try? startEngine()
     }
 
+    /// Les notifications arrivent sur le fil qui les poste ; tout le traitement repart sur `control`.
     private func observeSystemEvents() {
         let center = NotificationCenter.default
         let session = AVAudioSession.sharedInstance()
         observers = [
             // Fin d'interruption (appel, Siri, alarme) : le moteur reste arrêté tant qu'on ne le relance pas.
-            center.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] note in
+            center.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: nil) { [weak self] note in
                 guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-                      AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
-                self?.resume()
+                      AVAudioSession.InterruptionType(rawValue: raw) == .ended,
+                      let self else { return }
+                self.control.async { self.resume() }
             },
             // Changement de configuration (micro branché ou retiré, fréquence d'échantillonnage) :
             // le moteur s'arrête de lui-même.
-            center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] note in
-                guard let self, (note.object as? AVAudioEngine) === self.engine else { return }
-                self.resume()
+            center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil) { [weak self] note in
+                guard let self, let source = note.object as? AVAudioEngine else { return }
+                self.control.async {
+                    guard source === self.engine else { return }
+                    self.resume()
+                }
             },
             // Réinitialisation des services audio : les objets audio existants ne sont plus valides,
             // il faut un moteur neuf.
-            center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: .main) { [weak self] _ in
+            center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: nil) { [weak self] _ in
                 guard let self else { return }
-                self.engine = AVAudioEngine()
-                self.tapInstalled = false
-                self.resume()
+                self.control.async {
+                    self.engine = AVAudioEngine()
+                    self.tapInstalled = false
+                    self.resume()
+                }
             },
         ]
     }
